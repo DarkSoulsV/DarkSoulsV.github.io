@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CS/IS 190 — Packet Routing Clock</title>
+<style>
+    * { box-sizing: border-box; }
+
+    html, body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+        font-family: Arial, Helvetica, sans-serif;
+    }
+
+    .clock-shell {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        min-height: 240px;
+        overflow: hidden;
+        border-radius: 16px;
+        background:
+            radial-gradient(circle at 50% 20%, rgba(45,103,170,0.14), transparent 42%),
+            linear-gradient(180deg, #07101b 0%, #0a1320 55%, #07101b 100%);
+        border: 2px solid rgba(88,166,255,0.45);
+        box-shadow:
+            inset 0 0 30px rgba(88,166,255,0.08),
+            0 8px 22px rgba(0,0,0,0.24);
+    }
+
+    canvas {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+    }
+
+    .overlay {
+        position: absolute;
+        inset: 0;
+        z-index: 3;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+        text-align: center;
+        padding: 18px;
+    }
+
+    .status {
+        margin-bottom: 8px;
+        color: #8fc7ff;
+        font-size: clamp(11px, 2vw, 15px);
+        font-weight: 700;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        text-shadow: 0 0 10px rgba(88,166,255,0.3);
+    }
+
+    .time {
+        min-width: 74%;
+        padding: 7px 18px 5px;
+        border-radius: 10px;
+        color: #eaf6ff;
+        background: rgba(4,11,21,0.66);
+        border: 1px solid rgba(143,199,255,0.22);
+        font-family: "Courier New", Consolas, monospace;
+        font-size: clamp(38px, 10vw, 82px);
+        font-weight: 700;
+        line-height: 1;
+        letter-spacing: 0.035em;
+        text-shadow:
+            0 0 7px rgba(161,220,255,0.95),
+            0 0 20px rgba(56,139,253,0.62);
+        box-shadow:
+            inset 0 0 20px rgba(88,166,255,0.04),
+            0 0 20px rgba(0,0,0,0.15);
+    }
+
+    .date {
+        margin-top: 9px;
+        color: #c9d7e6;
+        font-size: clamp(13px, 2.5vw, 18px);
+        font-weight: 600;
+        letter-spacing: 0.035em;
+        text-shadow: 0 2px 8px rgba(0,0,0,0.7);
+    }
+
+    .footer {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 15px;
+        z-index: 3;
+        text-align: center;
+        color: rgba(181, 210, 240, 0.68);
+        font-size: clamp(9px, 1.6vw, 12px);
+        font-weight: 600;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        pointer-events: none;
+    }
+</style>
+</head>
+<body>
+
+<div class="clock-shell" id="clockShell">
+    <canvas id="networkCanvas" aria-hidden="true"></canvas>
+
+    <div class="overlay">
+        <div class="status">CS/IS 190 • NETWORK STATUS: ONLINE</div>
+        <div class="time" id="time">--:--:--</div>
+        <div class="date" id="date">Loading date...</div>
+    </div>
+
+    <div class="footer">Packets • Routes • Delivery • ACK</div>
+</div>
+
+<script>
+(() => {
+    "use strict";
+
+    /* =========================
+       CLOCK
+    ========================= */
+    const timeEl = document.getElementById("time");
+    const dateEl = document.getElementById("date");
+
+    function updateClock() {
+        const now = new Date();
+
+        timeEl.textContent = new Intl.DateTimeFormat("en-US", {
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: true
+        }).format(now);
+
+        dateEl.textContent = new Intl.DateTimeFormat("en-US", {
+            weekday: "long",
+            month: "long",
+            day: "numeric",
+            year: "numeric"
+        }).format(now);
+    }
+
+    updateClock();
+    setInterval(updateClock, 1000);
+
+    /* =========================
+       NETWORK SIMULATION
+    ========================= */
+    const shell = document.getElementById("clockShell");
+    const canvas = document.getElementById("networkCanvas");
+    const ctx = canvas.getContext("2d");
+
+    let width = 0;
+    let height = 0;
+    let dpr = 1;
+    let lastTime = 0;
+    let totalTime = 0;
+
+    let nodes = {};
+    let links = [];
+    let packets = [];
+    let pulses = [];
+    let stars = [];
+
+    let packetTimer = 0.6;
+    let failureTimer = 8.5;
+    let failedLinkId = null;
+    let restoreTimer = 0;
+
+    const packetTypes = [
+        { label: "PING", color: "#7ee787" },
+        { label: "DNS",  color: "#d2a8ff" },
+        { label: "HTTP", color: "#79c0ff" },
+        { label: "DATA", color: "#ffa657" }
+    ];
+
+    function rand(min, max) {
+        return Math.random() * (max - min) + min;
+    }
+
+    function resize() {
+        const rect = shell.getBoundingClientRect();
+        dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+        width = Math.max(1, rect.width);
+        height = Math.max(1, rect.height);
+
+        canvas.width = Math.round(width * dpr);
+        canvas.height = Math.round(height * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        buildTopology();
+        makeStars();
+    }
+
+    function makeStars() {
+        stars = [];
+        for (let i = 0; i < 55; i++) {
+            stars.push({
+                x: rand(0, width),
+                y: rand(0, height),
+                r: rand(0.6, 1.6),
+                a: rand(0.08, 0.32)
+            });
+        }
+    }
+
+    function buildTopology() {
+        // Intentionally keeps most nodes around the edges so the center clock remains readable.
+        nodes = {
+            pc1:    { id: "pc1",    type: "pc",     label: "PC-A",    x: width * 0.08, y: height * 0.30 },
+            pc2:    { id: "pc2",    type: "pc",     label: "PC-B",    x: width * 0.08, y: height * 0.72 },
+            sw:     { id: "sw",     type: "switch", label: "SW1",     x: width * 0.23, y: height * 0.50 },
+            r1:     { id: "r1",     type: "router", label: "R1",      x: width * 0.39, y: height * 0.23 },
+            r2:     { id: "r2",     type: "router", label: "R2",      x: width * 0.39, y: height * 0.79 },
+            r3:     { id: "r3",     type: "router", label: "R3",      x: width * 0.68, y: height * 0.22 },
+            r4:     { id: "r4",     type: "router", label: "R4",      x: width * 0.68, y: height * 0.80 },
+            dns:    { id: "dns",    type: "server", label: "DNS",     x: width * 0.89, y: height * 0.31 },
+            server: { id: "server", type: "server", label: "SERVER",  x: width * 0.89, y: height * 0.70 }
+        };
+
+        links = [
+            link("pc1", "sw"),
+            link("pc2", "sw"),
+            link("sw", "r1"),
+            link("sw", "r2"),
+            link("r1", "r2"),
+            link("r1", "r3"),
+            link("r1", "r4"),
+            link("r2", "r3"),
+            link("r2", "r4"),
+            link("r3", "r4"),
+            link("r3", "dns"),
+            link("r3", "server"),
+            link("r4", "dns"),
+            link("r4", "server")
+        ];
+    }
+
+    function link(a, b) {
+        return {
+            id: [a, b].sort().join("-"),
+            a,
+            b
+        };
+    }
+
+    function getLink(a, b) {
+        const id = [a, b].sort().join("-");
+        return links.find(l => l.id === id);
+    }
+
+    function isLinkUp(a, b) {
+        const l = getLink(a, b);
+        return l && l.id !== failedLinkId;
+    }
+
+    function neighbors(id) {
+        const out = [];
+        for (const l of links) {
+            if (l.id === failedLinkId) continue;
+            if (l.a === id) out.push(l.b);
+            else if (l.b === id) out.push(l.a);
+        }
+        return out;
+    }
+
+    function findPath(start, goal) {
+        // Simple BFS: enough for this visual network and very clear conceptually.
+        const queue = [[start]];
+        const visited = new Set([start]);
+
+        while (queue.length) {
+            const path = queue.shift();
+            const current = path[path.length - 1];
+
+            if (current === goal) return path;
+
+            for (const n of neighbors(current)) {
+                if (!visited.has(n)) {
+                    visited.add(n);
+                    queue.push([...path, n]);
+                }
+            }
+        }
+
+        return null;
+    }
+
+    function spawnPacket() {
+        const source = Math.random() < 0.5 ? "pc1" : "pc2";
+        const type = packetTypes[Math.floor(Math.random() * packetTypes.length)];
+
+        let target;
+        if (type.label === "DNS") {
+            target = "dns";
+        } else {
+            target = Math.random() < 0.78 ? "server" : "dns";
+        }
+
+        const path = findPath(source, target);
+        if (!path || path.length < 2) return;
+
+        packets.push({
+            source,
+            target,
+            type,
+            path,
+            segment: 0,
+            t: 0,
+            speed: rand(0.44, 0.62),
+            ack: false,
+            alpha: 1
+        });
+    }
+
+    function spawnAck(original) {
+        const path = findPath(original.target, original.source);
+        if (!path || path.length < 2) return;
+
+        packets.push({
+            source: original.target,
+            target: original.source,
+            type: { label: "ACK", color: "#a5d6ff" },
+            path,
+            segment: 0,
+            t: 0,
+            speed: rand(0.52, 0.70),
+            ack: true,
+            alpha: 0.88
+        });
+    }
+
+    function failRandomCoreLink() {
+        const candidates = links.filter(l => {
+            // Keep endpoint links stable so the topology remains connected more often.
+            return !l.a.startsWith("pc") &&
+                   !l.b.startsWith("pc") &&
+                   l.a !== "sw" &&
+                   l.b !== "sw";
+        });
+
+        if (!candidates.length) return;
+
+        failedLinkId = candidates[Math.floor(Math.random() * candidates.length)].id;
+        restoreTimer = rand(3.0, 4.5);
+
+        const l = links.find(x => x.id === failedLinkId);
+        if (l) {
+            const a = nodes[l.a];
+            const b = nodes[l.b];
+            pulses.push({
+                x: (a.x + b.x) / 2,
+                y: (a.y + b.y) / 2,
+                r: 4,
+                life: 0.9,
+                color: "#ff7b72"
+            });
+        }
+
+        // Recalculate active packet routes if their remaining path contains the failed link.
+        for (const p of packets) {
+            const currentNode = p.path[Math.min(p.segment, p.path.length - 1)];
+            const newPath = findPath(currentNode, p.target);
+            if (newPath && newPath.length >= 1) {
+                p.path = newPath;
+                p.segment = 0;
+                p.t = 0;
+            }
+        }
+    }
+
+    function restoreFailedLink() {
+        if (!failedLinkId) return;
+
+        const l = links.find(x => x.id === failedLinkId);
+        if (l) {
+            const a = nodes[l.a];
+            const b = nodes[l.b];
+            pulses.push({
+                x: (a.x + b.x) / 2,
+                y: (a.y + b.y) / 2,
+                r: 4,
+                life: 0.8,
+                color: "#7ee787"
+            });
+        }
+
+        failedLinkId = null;
+        failureTimer = rand(8, 13);
+    }
+
+    function updatePacket(p, dt) {
+        if (!p.path || p.path.length < 2) {
+            p.alpha = 0;
+            return;
+        }
+
+        p.t += dt * p.speed;
+
+        while (p.t >= 1) {
+            p.t -= 1;
+            p.segment += 1;
+
+            if (p.segment >= p.path.length - 1) {
+                const end = nodes[p.target];
+                pulses.push({
+                    x: end.x,
+                    y: end.y,
+                    r: 4,
+                    life: 0.55,
+                    color: p.type.color
+                });
+
+                if (!p.ack) {
+                    spawnAck(p);
+                }
+
+                p.alpha = 0;
+                return;
+            }
+
+            // If a route segment becomes unavailable while moving, reroute from current node.
+            const a = p.path[p.segment];
+            const b = p.path[p.segment + 1];
+
+            if (!isLinkUp(a, b)) {
+                const newPath = findPath(a, p.target);
+                if (!newPath) {
+                    p.alpha = 0;
+                    return;
+                }
+
+                p.path = newPath;
+                p.segment = 0;
+                p.t = 0;
+            }
+        }
+    }
+
+    function packetPosition(p) {
+        const aId = p.path[p.segment];
+        const bId = p.path[Math.min(p.segment + 1, p.path.length - 1)];
+
+        const a = nodes[aId];
+        const b = nodes[bId];
+
+        const t = p.t;
+        return {
+            x: a.x + (b.x - a.x) * t,
+            y: a.y + (b.y - a.y) * t
+        };
+    }
+
+    function update(dt) {
+        totalTime += dt;
+
+        packetTimer -= dt;
+        if (packetTimer <= 0) {
+            spawnPacket();
+            packetTimer = rand(1.15, 1.85);
+        }
+
+        if (failedLinkId) {
+            restoreTimer -= dt;
+            if (restoreTimer <= 0) restoreFailedLink();
+        } else {
+            failureTimer -= dt;
+            if (failureTimer <= 0) failRandomCoreLink();
+        }
+
+        for (const p of packets) {
+            updatePacket(p, dt);
+        }
+        packets = packets.filter(p => p.alpha > 0);
+
+        for (const pulse of pulses) {
+            pulse.life -= dt;
+            pulse.r += 42 * dt;
+        }
+        pulses = pulses.filter(p => p.life > 0);
+    }
+
+    function drawBackground() {
+        const bg = ctx.createLinearGradient(0, 0, width, height);
+        bg.addColorStop(0, "#08111d");
+        bg.addColorStop(0.5, "#0c1830");
+        bg.addColorStop(1, "#08111d");
+
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, width, height);
+
+        for (const s of stars) {
+            ctx.fillStyle = `rgba(219,234,254,${s.a})`;
+            ctx.beginPath();
+            ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // Faint technical grid
+        ctx.strokeStyle = "rgba(143,199,255,0.025)";
+        for (let x = 0; x <= width; x += 24) {
+            ctx.beginPath();
+            ctx.moveTo(x + 0.5, 0);
+            ctx.lineTo(x + 0.5, height);
+            ctx.stroke();
+        }
+
+        for (let y = 0; y <= height; y += 24) {
+            ctx.beginPath();
+            ctx.moveTo(0, y + 0.5);
+            ctx.lineTo(width, y + 0.5);
+            ctx.stroke();
+        }
+    }
+
+    function drawLinks() {
+        for (const l of links) {
+            const a = nodes[l.a];
+            const b = nodes[l.b];
+            const down = l.id === failedLinkId;
+
+            ctx.save();
+
+            ctx.lineWidth = down ? 2.4 : 1.5;
+            ctx.strokeStyle = down
+                ? "rgba(255,123,114,0.68)"
+                : "rgba(121,192,255,0.20)";
+
+            if (down) {
+                ctx.setLineDash([6, 6]);
+            }
+
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.stroke();
+
+            if (!down) {
+                // Small flowing dot gives links a subtle "alive" feel.
+                const phase = (totalTime * 0.10 + links.indexOf(l) * 0.13) % 1;
+                const x = a.x + (b.x - a.x) * phase;
+                const y = a.y + (b.y - a.y) * phase;
+
+                ctx.fillStyle = "rgba(121,192,255,0.23)";
+                ctx.beginPath();
+                ctx.arc(x, y, 1.6, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            ctx.restore();
+        }
+    }
+
+    function nodeRadius(n) {
+        if (n.type === "router") return 12;
+        if (n.type === "switch") return 11;
+        return 10;
+    }
+
+    function drawNode(n) {
+        const r = nodeRadius(n);
+
+        ctx.save();
+
+        let color = "#79c0ff";
+        if (n.type === "router") color = "#8fc7ff";
+        if (n.type === "switch") color = "#7ee787";
+        if (n.type === "server") color = "#d2a8ff";
+
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 8;
+        ctx.globalAlpha = 0.88;
+
+        if (n.type === "router") {
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+            ctx.stroke();
+
+            ctx.shadowBlur = 0;
+            ctx.globalAlpha = 0.55;
+            ctx.beginPath();
+            ctx.moveTo(n.x - 6, n.y);
+            ctx.lineTo(n.x + 6, n.y);
+            ctx.moveTo(n.x, n.y - 6);
+            ctx.lineTo(n.x, n.y + 6);
+            ctx.stroke();
+        } else if (n.type === "switch") {
+            ctx.fillStyle = color;
+            ctx.globalAlpha = 0.60;
+            ctx.fillRect(n.x - 12, n.y - 8, 24, 16);
+
+            ctx.shadowBlur = 0;
+            ctx.fillStyle = "#07101b";
+            for (let i = 0; i < 4; i++) {
+                ctx.fillRect(n.x - 8 + i * 5, n.y - 2, 2.5, 4);
+            }
+        } else if (n.type === "server") {
+            ctx.fillStyle = color;
+            ctx.globalAlpha = 0.60;
+            ctx.fillRect(n.x - 9, n.y - 12, 18, 24);
+
+            ctx.shadowBlur = 0;
+            ctx.strokeStyle = "rgba(255,255,255,0.35)";
+            ctx.beginPath();
+            ctx.moveTo(n.x - 6, n.y - 4);
+            ctx.lineTo(n.x + 6, n.y - 4);
+            ctx.moveTo(n.x - 6, n.y + 3);
+            ctx.lineTo(n.x + 6, n.y + 3);
+            ctx.stroke();
+        } else {
+            // PC icon
+            ctx.fillStyle = color;
+            ctx.globalAlpha = 0.55;
+            ctx.fillRect(n.x - 10, n.y - 8, 20, 14);
+
+            ctx.shadowBlur = 0;
+            ctx.fillStyle = color;
+            ctx.fillRect(n.x - 2, n.y + 6, 4, 5);
+            ctx.fillRect(n.x - 7, n.y + 10, 14, 2);
+        }
+
+        ctx.globalAlpha = 0.76;
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = "#c9d7e6";
+        ctx.font = "600 10px Arial";
+        ctx.textAlign = "center";
+        ctx.fillText(n.label, n.x, n.y + r + 17);
+
+        ctx.restore();
+    }
+
+    function drawPackets() {
+        for (const p of packets) {
+            const pos = packetPosition(p);
+
+            ctx.save();
+            ctx.globalAlpha = p.alpha;
+
+            ctx.shadowColor = p.type.color;
+            ctx.shadowBlur = 10;
+            ctx.fillStyle = p.type.color;
+
+            const w = p.type.label === "HTTP" ? 31 : 27;
+            const h = 14;
+
+            ctx.fillRect(pos.x - w / 2, pos.y - h / 2, w, h);
+
+            ctx.shadowBlur = 0;
+            ctx.fillStyle = "#07101b";
+            ctx.font = "700 8px Arial";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(p.type.label, pos.x, pos.y + 0.5);
+
+            ctx.restore();
+        }
+    }
+
+    function drawPulses() {
+        for (const pulse of pulses) {
+            ctx.save();
+            ctx.globalAlpha = Math.max(0, pulse.life * 1.8);
+            ctx.strokeStyle = pulse.color;
+            ctx.lineWidth = 1.7;
+            ctx.beginPath();
+            ctx.arc(pulse.x, pulse.y, pulse.r, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.restore();
+        }
+    }
+
+    function drawFailureLabel() {
+        if (!failedLinkId) return;
+
+        const l = links.find(x => x.id === failedLinkId);
+        if (!l) return;
+
+        const a = nodes[l.a];
+        const b = nodes[l.b];
+
+        const x = (a.x + b.x) / 2;
+        const y = (a.y + b.y) / 2 - 9;
+
+        ctx.save();
+        ctx.fillStyle = "rgba(255,123,114,0.85)";
+        ctx.font = "700 9px Arial";
+        ctx.textAlign = "center";
+        ctx.fillText("LINK DOWN", x, y);
+        ctx.restore();
+    }
+
+    function drawStatusCounter() {
+        ctx.save();
+        ctx.fillStyle = "rgba(143,199,255,0.65)";
+        ctx.font = "600 10px Arial";
+        ctx.textAlign = "right";
+
+        const status = failedLinkId ? "REROUTING ACTIVE" : "ROUTING NORMAL";
+        ctx.fillText(status, width - 18, 23);
+
+        ctx.restore();
+    }
+
+    function render() {
+        ctx.clearRect(0, 0, width, height);
+
+        drawBackground();
+        drawLinks();
+        drawFailureLabel();
+
+        for (const id in nodes) {
+            drawNode(nodes[id]);
+        }
+
+        drawPackets();
+        drawPulses();
+        drawStatusCounter();
+    }
+
+    function loop(ts) {
+        const dt = Math.min(0.034, (ts - (lastTime || ts)) / 1000);
+        lastTime = ts;
+
+        update(dt);
+        render();
+
+        requestAnimationFrame(loop);
+    }
+
+    window.addEventListener("resize", resize);
+
+    resize();
+    requestAnimationFrame(loop);
+})();
+</script>
+
+</body>
+</html>
