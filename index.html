@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CS/IS 190 Network Clock</title>
+<style>
+    * { box-sizing: border-box; }
+
+    html, body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+        font-family: Arial, Helvetica, sans-serif;
+    }
+
+    .clock-shell {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        min-height: 240px;
+        overflow: hidden;
+        border-radius: 16px;
+        background:
+            radial-gradient(circle at 50% 20%, rgba(45, 103, 170, 0.14), transparent 42%),
+            linear-gradient(180deg, #07101b 0%, #0a1320 55%, #07101b 100%);
+        border: 2px solid rgba(88, 166, 255, 0.45);
+        box-shadow:
+            inset 0 0 30px rgba(88, 166, 255, 0.08),
+            0 8px 22px rgba(0, 0, 0, 0.24);
+    }
+
+    canvas {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+    }
+
+    .overlay {
+        position: absolute;
+        inset: 0;
+        z-index: 3;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+        text-align: center;
+        padding: 18px;
+    }
+
+    .status {
+        margin-bottom: 8px;
+        color: #8fc7ff;
+        font-size: clamp(11px, 2vw, 15px);
+        font-weight: 700;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        text-shadow: 0 0 10px rgba(88, 166, 255, 0.3);
+    }
+
+    .time {
+        min-width: 74%;
+        padding: 7px 18px 5px;
+        border-radius: 10px;
+        color: #eaf6ff;
+        background: rgba(4, 11, 21, 0.62);
+        border: 1px solid rgba(143, 199, 255, 0.22);
+        font-family: "Courier New", Consolas, monospace;
+        font-size: clamp(38px, 10vw, 82px);
+        font-weight: 700;
+        line-height: 1;
+        letter-spacing: 0.035em;
+        text-shadow:
+            0 0 7px rgba(161, 220, 255, 0.95),
+            0 0 20px rgba(56, 139, 253, 0.62);
+        box-shadow:
+            inset 0 0 20px rgba(88, 166, 255, 0.04),
+            0 0 20px rgba(0, 0, 0, 0.15);
+    }
+
+    .date {
+        margin-top: 9px;
+        color: #c9d7e6;
+        font-size: clamp(13px, 2.5vw, 18px);
+        font-weight: 600;
+        letter-spacing: 0.035em;
+        text-shadow: 0 2px 8px rgba(0, 0, 0, 0.7);
+    }
+
+    .scanline {
+        position: absolute;
+        left: 8%;
+        right: 8%;
+        bottom: 13px;
+        z-index: 3;
+        height: 2px;
+        opacity: 0.55;
+        background: linear-gradient(
+            90deg,
+            transparent,
+            rgba(88, 166, 255, 0.25),
+            rgba(88, 166, 255, 0.9),
+            rgba(88, 166, 255, 0.25),
+            transparent
+        );
+        animation: pulse 2.6s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+        0%, 100% { opacity: 0.28; transform: scaleX(0.78); }
+        50% { opacity: 0.72; transform: scaleX(1); }
+    }
+</style>
+</head>
+<body>
+
+<div class="clock-shell" id="clockShell">
+    <canvas id="gameCanvas" aria-hidden="true"></canvas>
+
+    <div class="overlay">
+        <div class="status">CS/IS 190 • NETWORK STATUS: ONLINE</div>
+        <div class="time" id="time">--:--:--</div>
+        <div class="date" id="date">Loading date...</div>
+    </div>
+
+    <div class="scanline"></div>
+</div>
+
+<script>
+(() => {
+    "use strict";
+
+    /* =========================
+       CLOCK
+    ========================= */
+    const timeEl = document.getElementById("time");
+    const dateEl = document.getElementById("date");
+
+    function updateClock() {
+        const now = new Date();
+
+        timeEl.textContent = new Intl.DateTimeFormat("en-US", {
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: true
+        }).format(now);
+
+        dateEl.textContent = new Intl.DateTimeFormat("en-US", {
+            weekday: "long",
+            month: "long",
+            day: "numeric",
+            year: "numeric"
+        }).format(now);
+    }
+
+    updateClock();
+    setInterval(updateClock, 1000);
+
+    /* =========================
+       SNAKE GAME BACKGROUND
+    ========================= */
+    const shell = document.getElementById("clockShell");
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+
+    let width = 0;
+    let height = 0;
+    let dpr = 1;
+
+    let cols = 0;
+    let rows = 0;
+    let cell = 0;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    let lastFrame = 0;
+    let moveAccumulator = 0;
+    const MOVE_INTERVAL = 0.115;
+
+    let stars = [];
+    let pulses = [];
+    let resetFlash = 0;
+
+    const directions = {
+        up:    { x: 0,  y: -1, name: "up" },
+        down:  { x: 0,  y: 1,  name: "down" },
+        left:  { x: -1, y: 0,  name: "left" },
+        right: { x: 1,  y: 0,  name: "right" }
+    };
+
+    const order = [directions.up, directions.right, directions.down, directions.left];
+
+    let snake = [];
+    let dir = directions.right;
+    let food = { x: 0, y: 0 };
+    let scorePulse = 0;
+
+    function rand(min, max) {
+        return Math.random() * (max - min) + min;
+    }
+
+    function resize() {
+        const rect = shell.getBoundingClientRect();
+        dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+        width = Math.max(1, rect.width);
+        height = Math.max(1, rect.height);
+
+        canvas.width = Math.round(width * dpr);
+        canvas.height = Math.round(height * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        const targetCols = Math.max(24, Math.floor(width / 24));
+        const targetRows = Math.max(10, Math.floor(height / 24));
+
+        cell = Math.max(16, Math.min(24, Math.floor(Math.min(width / targetCols, height / targetRows))));
+        cols = Math.max(20, Math.floor((width - 12) / cell));
+        rows = Math.max(10, Math.floor((height - 12) / cell));
+
+        offsetX = Math.floor((width - cols * cell) / 2);
+        offsetY = Math.floor((height - rows * cell) / 2);
+
+        createStars();
+        resetGame();
+    }
+
+    function createStars() {
+        stars = [];
+        for (let i = 0; i < 55; i++) {
+            stars.push({
+                x: rand(0, width),
+                y: rand(0, height),
+                size: rand(0.8, 2.2),
+                alpha: rand(0.14, 0.58),
+                speed: rand(8, 34)
+            });
+        }
+    }
+
+    function resetGame() {
+        const startX = Math.max(6, Math.floor(cols * 0.18));
+        const startY = Math.max(4, Math.floor(rows * 0.5));
+
+        snake = [
+            { x: startX,     y: startY },
+            { x: startX - 1, y: startY },
+            { x: startX - 2, y: startY },
+            { x: startX - 3, y: startY }
+        ];
+
+        dir = directions.right;
+        spawnFood();
+        pulses = [];
+        scorePulse = 0;
+        resetFlash = 0.75;
+    }
+
+    function spawnFood() {
+        let tries = 0;
+        while (tries < 500) {
+            const fx = Math.floor(Math.random() * cols);
+            const fy = Math.floor(Math.random() * rows);
+            const onSnake = snake.some(s => s.x === fx && s.y === fy);
+            if (!onSnake) {
+                food = { x: fx, y: fy };
+                return;
+            }
+            tries++;
+        }
+        food = { x: Math.floor(cols / 2), y: Math.floor(rows / 2) };
+    }
+
+    function cellEquals(a, b) {
+        return a.x === b.x && a.y === b.y;
+    }
+
+    function insideBoard(c) {
+        return c.x >= 0 && c.x < cols && c.y >= 0 && c.y < rows;
+    }
+
+    function willHitBody(next, ignoreTail = true) {
+        const body = ignoreTail ? snake.slice(0, -1) : snake;
+        return body.some(segment => segment.x === next.x && segment.y === next.y);
+    }
+
+    function neighborsByDistance() {
+        const candidates = [...order];
+
+        candidates.sort((a, b) => {
+            const na = { x: snake[0].x + a.x, y: snake[0].y + a.y };
+            const nb = { x: snake[0].x + b.x, y: snake[0].y + b.y };
+            const da = Math.abs(na.x - food.x) + Math.abs(na.y - food.y);
+            const db = Math.abs(nb.x - food.x) + Math.abs(nb.y - food.y);
+            return da - db;
+        });
+
+        return candidates;
+    }
+
+    function pickDirection() {
+        const head = snake[0];
+
+        // First try moves that approach the food safely
+        const best = neighborsByDistance();
+        for (const option of best) {
+            const next = { x: head.x + option.x, y: head.y + option.y };
+            if (!insideBoard(next)) continue;
+            if (willHitBody(next, true)) continue;
+            return option;
+        }
+
+        // Then try any move inside the board, even if not optimal
+        for (const option of order) {
+            const next = { x: head.x + option.x, y: head.y + option.y };
+            if (!insideBoard(next)) continue;
+            if (willHitBody(next, true)) continue;
+            return option;
+        }
+
+        // If trapped, keep current and let reset happen
+        return dir;
+    }
+
+    function addPulse(x, y, color) {
+        pulses.push({
+            x, y,
+            r: 2,
+            life: 0.45,
+            color
+        });
+    }
+
+    function moveSnake() {
+        dir = pickDirection();
+
+        const head = snake[0];
+        const next = { x: head.x + dir.x, y: head.y + dir.y };
+
+        if (!insideBoard(next) || willHitBody(next, false)) {
+            resetGame();
+            return;
+        }
+
+        snake.unshift(next);
+
+        if (cellEquals(next, food)) {
+            scorePulse = 0.55;
+            addPulse(next.x, next.y, "255,166,87");
+            addPulse(next.x, next.y, "126,231,135");
+            spawnFood();
+        } else {
+            snake.pop();
+        }
+
+        // self collision safety
+        const biteSelf = snake.slice(1).some(s => s.x === next.x && s.y === next.y);
+        if (biteSelf) {
+            resetGame();
+        }
+    }
+
+    function update(dt) {
+        for (const s of stars) {
+            s.x -= s.speed * dt;
+            if (s.x < -2) {
+                s.x = width + rand(0, 40);
+                s.y = rand(0, height);
+                s.size = rand(0.8, 2.2);
+                s.alpha = rand(0.14, 0.58);
+                s.speed = rand(8, 34);
+            }
+        }
+
+        moveAccumulator += dt;
+        while (moveAccumulator >= MOVE_INTERVAL) {
+            moveSnake();
+            moveAccumulator -= MOVE_INTERVAL;
+        }
+
+        for (const p of pulses) {
+            p.life -= dt;
+            p.r += 45 * dt;
+        }
+        pulses = pulses.filter(p => p.life > 0);
+
+        scorePulse = Math.max(0, scorePulse - dt);
+        resetFlash = Math.max(0, resetFlash - dt * 1.6);
+    }
+
+    function roundedRect(x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.arcTo(x + w, y, x + w, y + h, r);
+        ctx.arcTo(x + w, y + h, x, y + h, r);
+        ctx.arcTo(x, y + h, x, y, r);
+        ctx.arcTo(x, y, x + w, y, r);
+        ctx.closePath();
+    }
+
+    function drawBackground() {
+        const sky = ctx.createLinearGradient(0, 0, width, height);
+        sky.addColorStop(0, "#08111d");
+        sky.addColorStop(0.5, "#0c1830");
+        sky.addColorStop(1, "#08111d");
+        ctx.fillStyle = sky;
+        ctx.fillRect(0, 0, width, height);
+
+        for (const s of stars) {
+            ctx.fillStyle = `rgba(219,234,254,${s.alpha})`;
+            ctx.fillRect(s.x, s.y, s.size, s.size);
+        }
+
+        // soft nebula glows
+        ctx.fillStyle = "rgba(88,166,255,0.045)";
+        ctx.beginPath();
+        ctx.arc(width * 0.22, height * 0.28, Math.min(width, height) * 0.18, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = "rgba(210,168,255,0.035)";
+        ctx.beginPath();
+        ctx.arc(width * 0.78, height * 0.70, Math.min(width, height) * 0.20, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    function drawBoardGrid() {
+        ctx.save();
+
+        for (let x = 0; x <= cols; x++) {
+            ctx.strokeStyle = x % 4 === 0 ? "rgba(143,199,255,0.075)" : "rgba(143,199,255,0.03)";
+            ctx.beginPath();
+            ctx.moveTo(offsetX + x * cell + 0.5, offsetY);
+            ctx.lineTo(offsetX + x * cell + 0.5, offsetY + rows * cell);
+            ctx.stroke();
+        }
+
+        for (let y = 0; y <= rows; y++) {
+            ctx.strokeStyle = y % 3 === 0 ? "rgba(143,199,255,0.07)" : "rgba(143,199,255,0.028)";
+            ctx.beginPath();
+            ctx.moveTo(offsetX, offsetY + y * cell + 0.5);
+            ctx.lineTo(offsetX + cols * cell, offsetY + y * cell + 0.5);
+            ctx.stroke();
+        }
+
+        ctx.strokeStyle = "rgba(88,166,255,0.12)";
+        ctx.strokeRect(offsetX + 0.5, offsetY + 0.5, cols * cell, rows * cell);
+
+        ctx.restore();
+    }
+
+    function drawFood(time) {
+        const px = offsetX + food.x * cell;
+        const py = offsetY + food.y * cell;
+        const pulse = 0.86 + Math.sin(time * 0.006) * 0.08;
+        const size = (cell - 8) * pulse;
+        const inset = (cell - size) / 2;
+
+        ctx.save();
+        ctx.shadowColor = "#ffa657";
+        ctx.shadowBlur = 12;
+        ctx.fillStyle = "rgba(255,166,87,0.9)";
+        roundedRect(px + inset, py + inset, size, size, Math.max(4, size * 0.25));
+        ctx.fill();
+
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = "rgba(255,255,255,0.35)";
+        ctx.fillRect(px + inset + 2, py + inset + 2, size - 4, Math.max(2, size * 0.16));
+        ctx.restore();
+    }
+
+    function drawSnake() {
+        snake.forEach((segment, index) => {
+            const px = offsetX + segment.x * cell;
+            const py = offsetY + segment.y * cell;
+            const inset = 2;
+            const w = cell - inset * 2;
+            const h = cell - inset * 2;
+
+            let color = "rgba(126,231,135,0.62)";
+            let shadow = "#7ee787";
+
+            if (index === 0) {
+                color = "rgba(126,231,135,0.95)";
+            } else if (index < 4) {
+                color = "rgba(121,192,255,0.62)";
+                shadow = "#79c0ff";
+            }
+
+            ctx.save();
+            ctx.shadowColor = shadow;
+            ctx.shadowBlur = index === 0 ? 12 : 7;
+            ctx.fillStyle = color;
+            roundedRect(px + inset, py + inset, w, h, 5);
+            ctx.fill();
+
+            ctx.shadowBlur = 0;
+            ctx.fillStyle = "rgba(255,255,255,0.25)";
+            ctx.fillRect(px + inset + 2, py + inset + 2, w - 4, Math.max(2, h * 0.14));
+
+            if (index === 0) {
+                ctx.fillStyle = "#0a1626";
+                if (dir.name === "right" || dir.name === "left") {
+                    const eyeY = py + inset + h * 0.34;
+                    const eye1 = dir.name === "right" ? px + inset + w * 0.58 : px + inset + w * 0.22;
+                    const eye2 = dir.name === "right" ? px + inset + w * 0.74 : px + inset + w * 0.38;
+                    ctx.fillRect(eye1, eyeY, 2.5, 2.5);
+                    ctx.fillRect(eye2, eyeY, 2.5, 2.5);
+                } else {
+                    const eyeX1 = px + inset + w * 0.28;
+                    const eyeX2 = px + inset + w * 0.62;
+                    const eyeY = dir.name === "down" ? py + inset + h * 0.58 : py + inset + h * 0.24;
+                    ctx.fillRect(eyeX1, eyeY, 2.5, 2.5);
+                    ctx.fillRect(eyeX2, eyeY, 2.5, 2.5);
+                }
+            }
+            ctx.restore();
+        });
+    }
+
+    function drawPulses() {
+        for (const p of pulses) {
+            const cx = offsetX + p.x * cell + cell / 2;
+            const cy = offsetY + p.y * cell + cell / 2;
+            ctx.save();
+            ctx.globalAlpha = Math.max(0, p.life * 1.8);
+            ctx.strokeStyle = `rgba(${p.color},1)`;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(cx, cy, p.r + cell * 0.2, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.restore();
+        }
+    }
+
+    function drawTechAccents(time) {
+        ctx.save();
+
+        for (let i = 0; i < 8; i++) {
+            const x = ((time * 0.05) + i * 140) % (width + 60) - 60;
+            ctx.strokeStyle = "rgba(88,166,255,0.045)";
+            ctx.beginPath();
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x + 18, height);
+            ctx.stroke();
+        }
+
+        // subtle length indicator
+        const lengthText = `SNAKE LENGTH: ${snake.length}`;
+        ctx.globalAlpha = 0.78;
+        ctx.fillStyle = scorePulse > 0 ? "#7ee787" : "#8fc7ff";
+        ctx.font = "600 12px Arial";
+        ctx.fillText(lengthText, offsetX + 10, offsetY + rows * cell - 10);
+
+        ctx.restore();
+    }
+
+    function render(time) {
+        ctx.clearRect(0, 0, width, height);
+        drawBackground();
+        drawBoardGrid();
+        drawFood(time);
+        drawSnake();
+        drawPulses();
+        drawTechAccents(time);
+
+        if (resetFlash > 0) {
+            ctx.save();
+            ctx.globalAlpha = resetFlash * 0.35;
+            ctx.fillStyle = "#8fc7ff";
+            ctx.fillRect(0, 0, width, height);
+            ctx.restore();
+        }
+    }
+
+    function loop(ts) {
+        const dt = Math.min(0.034, (ts - (lastFrame || ts)) / 1000);
+        lastFrame = ts;
+        update(dt);
+        render(ts);
+        requestAnimationFrame(loop);
+    }
+
+    window.addEventListener("resize", resize);
+    resize();
+    requestAnimationFrame(loop);
+})();
+</script>
+
+</body>
+</html>
